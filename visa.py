@@ -3,20 +3,21 @@
 import time
 import json
 import random
-import platform
+# import platform
 import configparser
 from datetime import datetime
 
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait as Wait
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+# from sendgrid import SendGridAPIClient
+# from sendgrid.helpers.mail import Mail
 
 
 config = configparser.ConfigParser()
@@ -42,13 +43,25 @@ REGEX_CONTINUE = "//a[contains(text(),'Continuar')]"
 # def MY_CONDITION(month, day): return int(month) == 11 and int(day) >= 5
 def MY_CONDITION(month, day): return True # No custom condition wanted for the new scheduled date
 
-STEP_TIME = 0.5  # time between steps (interactions with forms): 0.5 seconds
+STEP_TIME = 1.5  # time between steps (interactions with forms): 0.5 seconds
 RETRY_TIME = 60*10  # wait time between retries/checks for available dates: 10 minutes
 EXCEPTION_TIME = 60*30  # wait time when an exception occurs: 30 minutes
 COOLDOWN_TIME = 60*60  # wait time when temporary banned (empty list): 60 minutes
 
+
+JS_SCRIPT = ("var req = new XMLHttpRequest();"
+             f"req.open('GET', '%s', false);"
+             "req.setRequestHeader('Accept', 'application/json, text/javascript, */*; q=0.01');"
+             "req.setRequestHeader('X-Requested-With', 'XMLHttpRequest');"
+             f"req.setRequestHeader('Cookie', '_yatri_session=%s');"
+             "req.send(null);"
+             "return req.responseText;")
+
 DATE_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/days/{FACILITY_ID}.json?appointments[expedite]=false"
 TIME_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment/times/{FACILITY_ID}.json?date=%s&appointments[expedite]=false"
+# https://ais.usvisa-info.com/es-mx/niv/schedule/50698923/appointment/days/85.json?&consulate_id=72&consulate_date=&consulate_time=&appointments[expedite]=false
+# https://ais.usvisa-info.com/es-mx/niv/schedule/50698923/appointment/days/85.json?appointments%5Bexpedite%5D=false
+
 APPOINTMENT_URL = f"https://ais.usvisa-info.com/{COUNTRY_CODE}/niv/schedule/{SCHEDULE_ID}/appointment"
 EXIT = False
 
@@ -83,7 +96,9 @@ def send_notification(msg):
 
 def get_driver():
     if LOCAL_USE:
-        dr = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        options = Options()
+        options.add_argument("--start-maximized")
+        dr = webdriver.Chrome( )
     else:
         dr = webdriver.Remote(command_executor=HUB_ADDRESS, options=webdriver.ChromeOptions())
     return dr
@@ -135,20 +150,92 @@ def do_login_action():
     btn.click()
     time.sleep(random.randint(1, 3))
 
-    Wait(driver, 60).until(
+    Wait(driver, 120).until(
         EC.presence_of_element_located((By.XPATH, REGEX_CONTINUE)))
     print("\tlogin successful!")
 
+def process_browser_log_entry(entry):
+    response = json.loads(entry['message'])['message']
+    return response
+
+
+
+def get_date_new():
+    try:
+        driver.get(APPOINTMENT_URL)
+        # no longer able to jump with url, go there by clicking the button
+        #driver.get(url)
+        # continueBtn = driver.find_element(By.XPATH, '//a[contains(text(),"Continue")]')
+        # continueBtn.click()
+        # time.sleep(2) # wait for all the data to arrive. 
+        # find the 4th item's child element in the list
+        # serviceList = driver.find_element(By.XPATH, '//ul[@class="accordion custom_icons"]')
+        # child_elements = serviceList.find_elements_by_css_selector("li")
+        # get the 4th chiild item from the list then the first item that
+        # rescheduleBtn = (child_elements[3].find_elements_by_css_selector("a"))[0]
+        # rescheduleBtn.click()
+        # time.sleep(2) # wait for all the data to arrive. 
+        # realRescheduleBtn = driver.find_element(By.XPATH, '//a[contains(text(),"Reschedule Appointment")]')
+        # realRescheduleBtn.click()
+
+        print("check current url: " + driver.current_url)
+        time.sleep(2) # wait for all the data to arrive.
+        print("check current url2: " + driver.current_url)
+        browser_log = driver.get_log('performance')
+        print("check browser log: " + str(browser_log))
+        events = [process_browser_log_entry(entry) for entry in browser_log]
+        print("check events: " + str(events))
+        events = [event for event in events if 'Network.response' in event['method']]
+        print("check events: " + str(events))
+        targetIndex = -1;
+        for event in events:
+            if "response" in event["params"] and "url" in event["params"]["response"]:
+                if "/appointment/days/" in event["params"]["response"]["url"]:
+                    print ("Found the target url: " + event["params"]["response"]["url"])
+                    print ("Index: " + str(events.index(event)))
+                    targetIndex = events.index(event)
+                    break
+        print("check target index: " + str(targetIndex))
+        if targetIndex != -1:
+            body = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': events[targetIndex]["params"]["requestId"]})
+            print("Here is the body: " + str(body))
+            available_date = json.loads(body["body"])
+            print("Here is the available date: " + str(available_date))
+            return available_date
+        else:
+            return []
+    except Exception as e:
+        print("Exception: " + str(e))
+        return []
+
+
 
 def get_date():
-    driver.get(DATE_URL)
-    if not is_logged_in():
-        login()
-        return get_date()
-    else:
-        content = driver.find_element(By.TAG_NAME, 'pre').text
-        date = json.loads(content)
-        return date
+    # driver.get(DATE_URL)
+    print("Getting available dates...")
+    print(f"URL: {DATE_URL}")
+    # print
+    # if not is_logged_in():
+    #     login()
+    #     return get_date()
+    # else:
+    driver.get(APPOINTMENT_URL)
+    session = driver.get_cookie("_yatri_session")["value"]
+    NEW_GET = driver.execute_script(
+        "var req = new XMLHttpRequest();req.open('GET', '"
+        + str(DATE_URL)
+        + "', false);req.setRequestHeader('Accept', 'application/json, text/javascript, */*; q=0.01');req.setRequestHeader('X-Requested-With', 'XMLHttpRequest'); req.setRequestHeader('Cookie', '_yatri_session="
+        + session
+        + "'); req.send(null);return req.responseText;"
+    )
+    print(f"NEW_GET: {NEW_GET}")
+    return json.loads(NEW_GET)
+    script = JS_SCRIPT % (str(DATE_URL), driver.get_cookie("_yatri_session")["value"])
+    content = driver.execute_script(script)
+    print(f"Content: {content}")
+    # content = driver.find_element(By.TAG_NAME, 'pre').text
+    date = json.loads(content)
+    return date
 
 
 def get_time(date):
@@ -187,7 +274,7 @@ def reschedule(date):
     r = requests.post(APPOINTMENT_URL, headers=headers, data=data)
     if(r.text.find('Successfully Scheduled') != -1):
         msg = f"Rescheduled Successfully! {date} {time}"
-        send_notification(msg)
+        # send_notification(msg)
         EXIT = True
     else:
         msg = f"Reschedule Failed. {date} {time}"
@@ -242,7 +329,7 @@ if __name__ == "__main__":
     login()
     retry_count = 0
     while 1:
-        if retry_count > 6:
+        if retry_count > 1:
             break
         try:
             print("------------------")
@@ -251,6 +338,8 @@ if __name__ == "__main__":
             print()
 
             dates = get_date()[:5]
+            get_date_new()
+            print(dates)
             if not dates:
               msg = "List is empty"
               send_notification(msg)
@@ -260,8 +349,9 @@ if __name__ == "__main__":
             print()
             print(f"New date: {date}")
             if date:
-                reschedule(date)
-                push_notification(dates)
+                # reschedule(date)
+                # push_notification(dates)
+                print("Found a date!, you was going to reschedule it, but not now.")
 
             if(EXIT):
                 print("------------------exit")
